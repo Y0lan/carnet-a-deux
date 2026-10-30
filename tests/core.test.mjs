@@ -16,7 +16,7 @@ function stage(id = 'paris', extra = {}) {
   return { id, title: 'Paris', place: 'Paris, France', lat: 48.85, lng: 2.35, start: '2027-03-27', end: '2027-03-30', mood: 'culture', status: 'explorer', notes: '', experience: '', imageUrl: '', imageCredit: '', imageSource: '', ...extra };
 }
 function idea(id = 'hotel', extra = {}) {
-  return { id, stageId: 'paris', kind: 'hotel', title: 'Un hôtel', url: 'https://example.com/hotel', details: '', cost: 100, status: 'envie', voteA: false, voteB: false, date: '', time: '', endTime: '', address: '', owner: 'both', ...extra };
+  return { id, stageId: 'paris', kind: 'hotel', title: 'Un hôtel', url: 'https://example.com/hotel', details: '', cost: 100, status: 'envie', voteA: false, voteB: false, date: '', time: '', endTime: '', address: '', owner: 'both', imageUrl: '', imageCredit: '', imageSource: '', room: '', comfort: '', locationNote: '', priceBasis: 'estimate', priceNote: '', ...extra };
 }
 function notebook() {
   const data = emptyData(); data.stages.paris = stage(); data.ideas.hotel = idea(); return data;
@@ -444,7 +444,7 @@ function legacyData(value = notebook()) {
   data.schemaVersion = 1;
   delete data.flights; delete data.shopping;
   for (const stage of Object.values(data.stages)) for (const field of ['experience', 'imageUrl', 'imageCredit', 'imageSource']) delete stage[field];
-  for (const idea of Object.values(data.ideas)) for (const field of ['date', 'time', 'endTime', 'address', 'owner']) delete idea[field];
+  for (const idea of Object.values(data.ideas)) for (const field of ['date', 'time', 'endTime', 'address', 'owner', 'imageUrl', 'imageCredit', 'imageSource', 'room', 'comfort', 'locationNote', 'priceBasis', 'priceNote']) delete idea[field];
   return data;
 }
 function flight(extra = {}) {
@@ -659,7 +659,7 @@ test('cache v2 ancien : réponse perdue puis normalisation agenda sans écriture
   const server = service(t); const storage = new Storage(); const first = client(t, server.fetcher, storage);
   await first.sync.start(); first.sync.stop();
   const key = [...storage.items.keys()][0]; const cache = JSON.parse(storage.getItem(key));
-  const old = notebook(); for (const field of ['date', 'time', 'endTime', 'address', 'owner']) delete old.ideas.hotel[field];
+  const old = notebook(); for (const field of ['date', 'time', 'endTime', 'address', 'owner', 'imageUrl', 'imageCredit', 'imageSource', 'room', 'comfort', 'locationNote', 'priceBasis', 'priceNote']) delete old.ideas.hotel[field];
   cache.base.data = clone(old); cache.local = clone(old); cache.local.trip.title = 'Brouillon v2 ancien';
   cache.pending = { revision: 0, writeId: 'old-v2-pending', data: clone(cache.local) };
   assert.equal((await server.request('PUT', cache.pending)).status, 200);
@@ -669,7 +669,63 @@ test('cache v2 ancien : réponse perdue puis normalisation agenda sans écriture
   assert.equal(restored.last().status, 'saved'); assert.equal(restored.last().revision, 1);
   assert.notEqual(sent.writeId, 'old-v2-pending');
   assert.equal(restored.last().data.ideas.hotel.owner, 'both');
+  assert.equal(restored.last().data.ideas.hotel.priceBasis, 'estimate');
+  assert.equal(restored.last().data.ideas.hotel.room, '');
   assert.equal(restored.last().data.trip.title, 'Brouillon v2 ancien');
   assert.equal(server.db.prepare('SELECT revision FROM trip').get().revision, 1);
   await restored.sync.refresh(); assert.equal(restored.last().status, 'saved');
+});
+
+test('comparatif : photos, prestations et origine des prix contrôlées à la frontière du carnet', () => {
+  const data = notebook();
+  Object.assign(data.ideas.hotel, {
+    imageUrl: 'https://images.example/hotel.jpg', imageCredit: 'Photo de démonstration', imageSource: 'https://example.com/photos',
+    room: 'Chambre double, lit à confirmer', comfort: 'Piscine annoncée dans la source', locationNote: 'Quartier à comparer',
+    priceBasis: 'historical', priceNote: 'Ancien total divisé par le nombre de nuits, conditions à revérifier.',
+  });
+  assert.doesNotThrow(() => validateData(data));
+  assert.deepEqual(migrateData(data), data);
+  for (const changes of [
+    { imageUrl: 'http://images.example/hotel.jpg' }, { imageUrl: 'javascript:alert(1)' },
+    { imageUrl: 'https://user:secret@images.example/a.jpg' }, { imageUrl: 'https://images.example/a\n.jpg' },
+    { imageSource: 'data:text/html,source' }, { imageCredit: null }, { imageCredit: 'x'.repeat(241) },
+    { room: 'x'.repeat(501) }, { room: null }, { comfort: 'x'.repeat(1001) },
+    { locationNote: 'x'.repeat(1001) }, { priceNote: 'x'.repeat(2001) }, { priceNote: null },
+    { priceBasis: 'confirmed' }, { priceBasis: null },
+  ]) {
+    const invalid = clone(data); Object.assign(invalid.ideas.hotel, changes);
+    assert.throws(() => validateData(invalid), error => error.name === 'ValidationError');
+  }
+  const checked = clone(data); checked.ideas.hotel.priceBasis = 'checked';
+  checked.ideas.hotel.priceNote = 'Montant consulté le 12 janvier 2027 pour une chambre double.';
+  assert.doesNotThrow(() => validateData(checked));
+  for (const changes of [{ cost: null }, { url: '' }, { priceNote: '   ' }]) {
+    const invalid = clone(checked); Object.assign(invalid.ideas.hotel, changes);
+    assert.throws(() => validateData(invalid), /prix vérifié/);
+  }
+  const legacy = legacyData(data); legacy.ideas.hotel.room = 'Une chambre';
+  assert.throws(() => validateData(legacy), /champs sont invalides/);
+});
+
+test('comparatif : migration des anciens montants sans inventer de tarif vérifié ou historique', () => {
+  const before = legacyData();
+  const priced = migrateData(before);
+  assert.deepEqual(legacyData(priced), before);
+  assert.equal(priced.ideas.hotel.cost, 100);
+  assert.equal(priced.ideas.hotel.priceBasis, 'estimate');
+  assert.equal(priced.ideas.hotel.priceNote, '');
+  assert.equal(priced.ideas.hotel.imageUrl, '');
+  assert.deepEqual(migrateData(priced), priced);
+  const oldV2 = notebook();
+  for (const field of ['imageUrl', 'imageCredit', 'imageSource', 'room', 'comfort', 'locationNote', 'priceBasis', 'priceNote']) delete oldV2.ideas.hotel[field];
+  oldV2.ideas.hotel.cost = null;
+  const original = clone(oldV2), unknown = migrateData(oldV2);
+  assert.deepEqual(oldV2, original);
+  assert.equal(unknown.ideas.hotel.priceBasis, 'unknown');
+  assert.equal(unknown.ideas.hotel.room, '');
+  oldV2.ideas.hotel.cost = 0;
+  assert.equal(migrateData(oldV2).ideas.hotel.priceBasis, 'estimate');
+  const explicit = clone(priced); explicit.ideas.hotel.priceBasis = 'historical'; explicit.ideas.hotel.priceNote = 'Ancien tarif saisi par les voyageurs.';
+  assert.equal(migrateData(explicit).ideas.hotel.priceBasis, 'historical');
+  assert.equal(migrateData(explicit).ideas.hotel.priceNote, explicit.ideas.hotel.priceNote);
 });

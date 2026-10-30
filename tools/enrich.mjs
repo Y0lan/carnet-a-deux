@@ -17,7 +17,15 @@ export function mergeEnrichment(current, enrichment) {
       for (const key of ['imageUrl', 'imageCredit', 'imageSource']) if (Object.hasOwn(values, key)) stage[key] = values[key];
     }
   }
-  for (const table of ['flights', 'shopping']) {
+  for (const [id, values] of Object.entries(enrichment.ideaFields ?? {})) {
+    if (!Object.hasOwn(next.ideas, id)) continue;
+    const idea = next.ideas[id];
+    for (const key of ['room', 'comfort', 'locationNote', 'priceNote']) if (!idea[key] && Object.hasOwn(values, key)) idea[key] = values[key];
+    if (!idea.imageUrl && !idea.imageCredit && !idea.imageSource) {
+      for (const key of ['imageUrl', 'imageCredit', 'imageSource']) if (Object.hasOwn(values, key)) idea[key] = values[key];
+    }
+  }
+  for (const table of ['ideas', 'flights', 'shopping']) {
     for (const [id, record] of Object.entries(enrichment[table] ?? {})) {
       if (Object.hasOwn(next[table], id)) continue;
       const references = table === 'flights' ? [record.fromStageId, record.toStageId] : [record.stageId];
@@ -25,7 +33,7 @@ export function mergeEnrichment(current, enrichment) {
       Object.defineProperty(next[table], id, { value: structuredClone(record), enumerable: true, configurable: true, writable: true });
     }
   }
-  return validateData(next);
+  return migrateData(next);
 }
 
 async function readJson(path, fallback) {

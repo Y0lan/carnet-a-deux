@@ -4,7 +4,13 @@ export const STAGE_STATUSES = Object.freeze(['explorer', 'envie', 'retenu', 'res
 export const IDEA_STATUSES = STAGE_STATUSES;
 const LEGACY_IDEA_KINDS = Object.freeze(['hotel', 'activite', 'trajet', 'materiel']);
 export const IDEA_KINDS = Object.freeze([...LEGACY_IDEA_KINDS, 'restaurant', 'boutique', 'exposition', 'lieu', 'evenement']);
-const IDEA_DEFAULTS = Object.freeze({ date: '', time: '', endTime: '', address: '', owner: 'both' });
+export const PRICE_BASES = Object.freeze(['unknown', 'estimate', 'historical', 'checked']);
+const IDEA_DEFAULTS = Object.freeze({
+  date: '', time: '', endTime: '', address: '', owner: 'both',
+  imageUrl: '', imageCredit: '', imageSource: '', room: '', comfort: '', locationNote: '',
+  priceBasis: 'unknown', priceNote: '',
+});
+const ideaDefaults = (idea) => ({ ...IDEA_DEFAULTS, priceBasis: idea.cost === null ? 'unknown' : 'estimate' });
 export const FLIGHT_STATUSES = Object.freeze(['explorer', 'retenu', 'reserve']);
 export const SHOPPING_CATEGORIES = Object.freeze(['camping', 'vetements', 'dj', 'ordinateur', 'production', 'autre']);
 export const SHOPPING_STATUSES = Object.freeze(['envie', 'comparer', 'acheter', 'commande', 'achete', 'possede']);
@@ -172,7 +178,7 @@ export function validateData(data) {
     price(idea.cost, `${path}/cost`);
     preferences(idea, path);
     if (current) {
-      const agenda = { ...IDEA_DEFAULTS, ...idea };
+      const agenda = { ...ideaDefaults(idea), ...idea };
       if (agenda.date !== '' && !isCivilDate(agenda.date)) fail('La date de cette idée est invalide.', `${path}/date`);
       for (const field of ['time', 'endTime']) {
         if (agenda[field] !== '' && (typeof agenda[field] !== 'string' || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(agenda[field]))) fail('L’heure doit être au format HH:mm.', `${path}/${field}`);
@@ -181,6 +187,15 @@ export function validateData(data) {
       if (agenda.endTime && !agenda.time) fail('Indique l’heure de début avant l’heure de fin.', `${path}/time`);
       text(agenda.address, 500, `${path}/address`);
       choice(agenda.owner, PEOPLE, `${path}/owner`);
+      link(agenda.imageUrl, `${path}/imageUrl`, true);
+      text(agenda.imageCredit, 240, `${path}/imageCredit`);
+      link(agenda.imageSource, `${path}/imageSource`);
+      text(agenda.room, 500, `${path}/room`);
+      text(agenda.comfort, 1000, `${path}/comfort`);
+      text(agenda.locationNote, 1000, `${path}/locationNote`);
+      choice(agenda.priceBasis, PRICE_BASES, `${path}/priceBasis`);
+      text(agenda.priceNote, 2000, `${path}/priceNote`);
+      if (agenda.priceBasis === 'checked' && (idea.cost === null || !idea.url || !agenda.priceNote.trim())) fail('Pour un prix vérifié, indique son montant, son lien source et une note avec la date de vérification.', `${path}/priceBasis`);
     }
   }
   if (current) {
@@ -246,7 +261,7 @@ export function migrateData(data) {
     for (const stage of Object.values(next.stages)) Object.assign(stage, { experience: '', imageUrl: '', imageCredit: '', imageSource: '' });
   }
   for (const idea of Object.values(next.ideas)) {
-    for (const [field, value] of Object.entries(IDEA_DEFAULTS)) if (!Object.hasOwn(idea, field)) idea[field] = value;
+    for (const [field, value] of Object.entries(ideaDefaults(idea))) if (!Object.hasOwn(idea, field)) idea[field] = value;
   }
   // The defaults are valid by construction; only the serialized size can grow.
   checkSize(next);

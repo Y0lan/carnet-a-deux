@@ -1,8 +1,10 @@
 # Carnet à deux
 
-Un carnet partagé : carte, calendrier des nuits, fiches d'étapes illustrées, hôtels et activités à comparer, vols et liste shopping.
+Un carnet partagé pour préparer le voyage et le consulter sur place. L'accueil présente les étapes en photos, avec leurs dates, leurs nuits et les repères de prix disponibles.
 
-La carte regroupe les repères proches à l'écran et les sépare au zoom. Elle propose un cadrage du voyage, de l'étape ou de sa liaison. Chaque étape peut avoir une photo avec son crédit, une description d'ambiance et les préférences des deux personnes.
+Une page dédiée à chaque étape réunit le séjour, les hôtels, les adresses et les notes. Les fiches d'hôtels affichent photo, prix par nuit, projection pour le séjour, chambre, confort et emplacement. Un comparatif permet de confronter deux ou trois hôtels. Les prix historiques conservent leur contexte et ne deviennent pas des offres actuelles. Les informations absentes restent explicites.
+
+La carte s'ouvre à la demande. Elle regroupe les repères proches à l'écran et les sépare au zoom. Elle propose un cadrage du voyage, de l'étape ou de sa liaison. Chaque étape peut avoir une photo avec son crédit, une description d'ambiance et les préférences des deux personnes.
 
 Les vols indiquent les horaires locaux, les fuseaux, la durée et les voyageurs. Les horaires peuvent rester vides tant qu'ils ne sont pas confirmés. Le shopping distingue les envies personnelles et communes, les prix par devise, les achats et le matériel déjà possédé.
 
@@ -47,7 +49,7 @@ Le script utilise les connexions existantes. Il accepte aussi `GH_TOKEN` et `CLO
 
 Le script refuse de remplacer des ressources existantes sans lien avec sa publication. `.private/deployment.json` permet de reprendre une publication interrompue. Si une création distante a été interrompue sans confirmation, vérifie la ressource avant toute nouvelle tentative. Aucune suppression automatique n'est effectuée. Le script ne change pas l'abonnement des comptes utilisés.
 
-Si un fichier privé `.private/enrichment.json` a été préparé, cette commande publie aussi ses photos, textes, projets de vols et pistes shopping :
+Si un fichier privé `.private/enrichment.json` a été préparé, cette commande publie aussi ses photos, descriptions, hôtels historiques, projets de vols et pistes shopping :
 
 ```sh
 npm run deploy -- --enrich
@@ -73,6 +75,6 @@ Les modifications indépendantes se fusionnent. Si deux personnes changent un m�
 - `tests/` : tests du noyau et de la séparation des fichiers publics.
 - `.private/` : données initiales, base locale, invitations et état de publication. Ignoré par Git.
 
-La carte combine Natural Earth et OpenStreetMap. Les lignes entre étapes sont schématiques. Sources et licences : `public/vendor/SOURCES.md`.
+La carte utilise MapLibre et le fond vectoriel OpenFreeMap, issu des données OpenStreetMap. Aucun compte de facturation ni clé API ne sont nécessaires. Les boutons Google Maps ouvrent la recherche ou la navigation dans un autre onglet. Les lignes entre étapes sont schématiques. Sources et licences : `public/vendor/SOURCES.md`.
 
 Les tests locaux ne prouvent pas le déploiement Cloudflare ou GitHub Pages. La publication doit réussir et être relue avant d'annoncer une version en ligne. Les prix, horaires et disponibilités ajoutés au carnet restent à vérifier.

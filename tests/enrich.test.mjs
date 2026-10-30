@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { mergeEnrichment, applyEnrichment } from '../tools/enrich.mjs';
+import { migrateData, validateData } from '../public/schema.js';
 import worker from '../worker/index.js';
 import { openDatabase } from '../tools/sqlite-adapter.mjs';
 
@@ -64,6 +65,60 @@ test('une étape supprimée ne revient pas avec ses fiches proposées', () => {
   assert.deepEqual(next.stages, {});
   assert.deepEqual(next.flights, {});
   assert.deepEqual(next.shopping, {});
+});
+
+test('import des idées : choix existants conservés, étape absente ignorée et ajout idempotent', () => {
+  const old = legacy();
+  old.ideas.kept = { id: 'kept', stageId: 'stop', kind: 'hotel', title: 'Hôtel déjà comparé', url: 'https://example.invalid/kept', details: 'Nos notes à conserver', cost: 160, status: 'retenu', voteA: true, voteB: true };
+  const current = migrateData(old), before = structuredClone(current);
+  const newIdea = { id: 'new', stageId: 'stop', kind: 'hotel', title: 'Ancienne piste', url: 'https://example.invalid/new', details: 'Piste issue d’un ancien carnet', cost: 120, status: 'explorer', voteA: false, voteB: false, priceBasis: 'historical', priceNote: 'Ancien séjour de 4 nuits : total 480 EUR, à revérifier.' };
+  const enrichment = { ideas: {
+    kept: { ...newIdea, id: 'kept', details: 'Ne doit pas remplacer nos notes', cost: 20, voteA: false, voteB: false },
+    new: newIdea,
+    detached: { ...newIdea, id: 'detached', stageId: 'removed' },
+  } };
+  const next = mergeEnrichment(current, enrichment);
+  assert.deepEqual(current, before);
+  assert.deepEqual(next.ideas.kept, before.ideas.kept);
+  assert.deepEqual(Object.keys(next.ideas).sort(), ['kept', 'new']);
+  assert.equal(next.ideas.new.cost, 120);
+  assert.equal(next.ideas.new.priceBasis, 'historical');
+  assert.equal(next.ideas.new.priceNote, newIdea.priceNote);
+  assert.doesNotThrow(() => validateData(next));
+  const normalized = migrateData(next);
+  assert.equal(normalized.ideas.new.room, '');
+  assert.equal(normalized.ideas.new.owner, 'both');
+  assert.equal(normalized.ideas.new.priceBasis, 'historical');
+  assert.deepEqual(mergeEnrichment(next, enrichment), next);
+  newIdea.details = 'Modification de la proposition après import';
+  assert.equal(next.ideas.new.details, 'Piste issue d’un ancien carnet');
+});
+
+test('les détails proposés complètent un hôtel sans changer ses choix ni mélanger les crédits', () => {
+  const old = legacy();
+  old.ideas.hotel = { id: 'hotel', stageId: 'stop', kind: 'hotel', title: 'Hôtel choisi', url: '', details: 'Nos notes', cost: 150, status: 'retenu', voteA: true, voteB: false };
+  const current = migrateData(old);
+  current.ideas.hotel.room = 'Notre chambre';
+  current.ideas.hotel.imageCredit = 'Crédit en cours';
+  const before = structuredClone(current);
+  const fields = { room: 'Autre chambre', comfort: 'Sauna', locationNote: 'Près du centre', priceNote: 'Prix à vérifier', cost: 20, voteA: false, imageUrl: 'https://example.invalid/room.jpg', imageCredit: 'Photo officielle', imageSource: 'https://example.invalid/rooms' };
+  const enrichment = { ideaFields: { hotel: fields, removed: fields } };
+  const next = mergeEnrichment(current, enrichment);
+  assert.deepEqual(current, before);
+  assert.equal(next.ideas.hotel.room, 'Notre chambre');
+  assert.equal(next.ideas.hotel.comfort, 'Sauna');
+  assert.equal(next.ideas.hotel.locationNote, 'Près du centre');
+  assert.equal(next.ideas.hotel.cost, 150);
+  assert.equal(next.ideas.hotel.priceBasis, 'estimate');
+  assert.equal(next.ideas.hotel.voteA, true);
+  assert.equal(next.ideas.hotel.imageUrl, '');
+  assert.equal(next.ideas.hotel.imageCredit, 'Crédit en cours');
+  assert.equal(next.ideas.hotel.imageSource, '');
+  assert.equal(Object.hasOwn(next.ideas, 'removed'), false);
+  assert.deepEqual(mergeEnrichment(next, enrichment), next);
+  current.ideas.hotel.imageCredit = '';
+  const withPhoto = mergeEnrichment(current, enrichment).ideas.hotel;
+  for (const key of ['imageUrl', 'imageCredit', 'imageSource']) assert.equal(withPhoto[key], fields[key]);
 });
 
 test('un ajout confirmé crée une sauvegarde privée et ne revient pas après suppression', async (t) => {

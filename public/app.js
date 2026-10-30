@@ -4,6 +4,7 @@ import { validateData, migrateData, nightsBetween, sortedStages, MAX_DOCUMENT_BY
 import { createJourneyMap } from './map.js';
 import { createCollections } from './collections.js';
 import { createAgenda } from './agenda.js';
+import { createHotelExplorer } from './hotels.js';
 
 const $ = (selector) => document.querySelector(selector);
 const formField = (form, name) => form.elements.namedItem(name);
@@ -23,7 +24,7 @@ let client, token = '', state, selectedId = '', filter = 'all', search = '', las
 let journeyMap, stageOriginal, ideaOriginal, tripOriginal, selectedLocation;
 let stageEditing = false, ideaEditing = false;
 let ideaReturnView = 'parcours';
-let currentView = 'parcours';
+let currentView = 'parcours', journeyArea = 'overview', mapReturnArea = 'overview';
 const collections = createCollections({ getData: () => state?.data, updateRecord, commit, feedback, onSelectStage: (id) => { showView('parcours'); selectStage(id); } });
 const agenda = createAgenda({
   getData: () => state?.data,
@@ -31,6 +32,36 @@ const agenda = createAgenda({
   onEditIdea: (id) => { showView('parcours'); selectedId = state.data.ideas[id].stageId; render(); openIdea(id, {}, 'agenda'); },
   onAddIdea: (stageId, defaults = {}) => { showView('parcours'); selectedId = stageId; render(); openIdea(undefined, { kind: 'activite', ...defaults }, 'agenda'); },
 });
+
+const hotelExplorer = createHotelExplorer({ getData: () => state?.data, getStageId: () => selectedId, onEdit: openIdea,
+  onVote: (id, suffix) => { const next = clone(state.data); if (next.ideas[id]) { next.ideas[id][`vote${suffix}`] = !next.ideas[id][`vote${suffix}`]; commit(next); } },
+  onDelete: (id) => { const idea = state.data.ideas[id]; if (idea && confirm(`Retirer « ${idea.title} » du carnet partagé ?`)) { const next = clone(state.data); delete next.ideas[id]; commit(next); } },
+});
+function showJourneyArea(area) {
+  journeyArea = area; $('#journey-overview').hidden = area !== 'overview'; $('#stage-workspace').hidden = area !== 'stage'; $('#parcours').hidden = area !== 'map';
+  if (area === 'map') requestAnimationFrame(() => journeyMap?.resize());
+}
+function openMap(scope = 'all') {
+  if (journeyArea !== 'map') mapReturnArea = journeyArea;
+  showJourneyArea('map'); journeyMap?.resize(); journeyMap?.fit(scope); setMapScope(scope); $('#parcours').scrollIntoView({ block: 'start' });
+  $('#map-back').textContent = mapReturnArea === 'stage' ? 'Revenir à l’étape' : 'Revenir au parcours';
+  $('#map-title').tabIndex = -1; $('#map-title').focus({ preventScroll: true });
+}
+function renderGallery(stages) {
+  $('#trip-gallery').replaceChildren(...stages.map((stage, index) => {
+    const card = el('button', { type: 'button', class: 'trip-card', 'data-gallery-stage': stage.id, 'aria-label': `Explorer ${stage.title}, ${range(stage)}` });
+    const visual = el('div', { class: 'trip-card-photo' });
+    if (stage.imageUrl) { const image = el('img', { src: stage.imageUrl, alt: '', loading: 'lazy', decoding: 'async', referrerpolicy: 'no-referrer' }); image.addEventListener('error', () => image.remove()); visual.append(image); }
+    visual.append(el('span', { class: 'trip-card-number', text: String(index + 1).padStart(2, '0') }), el('span', { class: 'trip-card-nights', text: nightLabel(nightsBetween(stage.start, stage.end)) }));
+    const options = Object.values(state.data.ideas).filter((idea) => idea.stageId === stage.id), hotels = options.filter((idea) => idea.kind === 'hotel'), prices = hotels.filter((idea) => idea.cost !== null).map((idea) => idea.cost);
+    const priceLabel = hotels.filter((idea) => idea.cost !== null).every((idea) => idea.priceBasis === 'historical') ? 'Anciens tarifs' : 'Tarifs à vérifier';
+    const price = prices.length ? `${priceLabel} : ${euro.format(Math.min(...prices))}${Math.max(...prices) !== Math.min(...prices) ? ` à ${euro.format(Math.max(...prices))}` : ''} / nuit` : 'Hébergements à chiffrer';
+    card.append(visual, el('div', { class: 'trip-card-copy' }, [el('p', { class: 'trip-card-dates', text: `${range(stage)} · ${moods[stage.mood]}` }), el('h2', { text: stage.title }), el('p', { text: `${hotels.length} hébergement${hotels.length > 1 ? 's' : ''} · ${options.length - hotels.length} autres idées` }), el('strong', { class: 'trip-card-price', text: price })]));
+    if (stage.imageCredit) card.append(el('span', { class: 'trip-card-credit', text: stage.imageCredit }));
+    card.addEventListener('click', () => selectStage(stage.id)); return card;
+  }));
+  if (!stages.length) $('#trip-gallery').append(el('p', { class: 'empty-state', text: 'Ajoutez votre première étape pour commencer le parcours.' }));
+}
 
 function el(tag, attrs = {}, children = []) {
   const node = document.createElement(tag);
@@ -103,6 +134,7 @@ function render() {
     button.addEventListener('click', () => selectStage(stage.id)); return el('li', { class: 'route-stop' }, [button]);
   }));
   $('#stage-list').scrollTop = oldScroll;
+  renderGallery(stages);
   $('#timeline').replaceChildren(...stages.map((stage) => {
     const n = nightsBetween(stage.start, stage.end);
     const button = el('button', { type: 'button', class: 'timeline-block', 'data-mood': stage.mood, 'aria-current': String(stage.id === selectedId), 'aria-label': `${stage.title}, ${range(stage)}, ${nightLabel(n)}` }, [el('strong', { text: stage.place }), el('span', { text: `${nightLabel(n)} · ${moods[stage.mood]}` }), el('span', { class: 'timeline-dates', text: range(stage) })]);
@@ -126,6 +158,7 @@ function selectStage(id, reveal = true) {
   render(); journeyMap.select(id);
   setMapScope('selected');
   if (reveal) {
+    showJourneyArea('stage');
     $('#etape').scrollIntoView({ block: 'start', behavior: 'instant' });
     $('#detail-title').focus({ preventScroll: true });
   }
@@ -137,7 +170,7 @@ function showView(view, focus = false) {
     const link = $(`[data-view="${name}"]`);
     if (name === currentView) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current');
   }
-  if (currentView === 'parcours') requestAnimationFrame(() => journeyMap?.resize());
+  if (currentView === 'parcours') showJourneyArea('overview');
   if (focus) {
     const heading = $({ parcours: '#trip-title', agenda: '#agenda-title', vols: '#flights-title', shopping: '#shopping-title' }[currentView]);
     heading.tabIndex = -1; heading.focus({ preventScroll: true }); heading.scrollIntoView({ block: 'start' });
@@ -169,31 +202,20 @@ function renderDetail() {
   image.alt = `Ambiance à ${stage.place}`;
   $('#stage-image-credit').textContent = stage.imageCredit || 'Voir la source';
   if (stage.imageSource) $('#stage-image-credit').href = stage.imageSource; else $('#stage-image-credit').removeAttribute('href');
-  renderHighlights(stage, stages[index - 1]);
+  renderHighlights();
+  hotelExplorer.render();
   $('#maps-link').href = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${stage.lat},${stage.lng}`)}`;
+  $('#map-google').href = $('#maps-link').href;
   for (const button of $('#kind-filters').querySelectorAll('button')) button.setAttribute('aria-pressed', String(button.dataset.kind === filter));
-  const ideas = Object.values(state.data.ideas).filter((idea) => idea.stageId === selectedId && (filter === 'all' || idea.kind === filter) && (!search || `${idea.title} ${idea.details}`.toLocaleLowerCase('fr').includes(search)));
+  const ideas = Object.values(state.data.ideas).filter((idea) => idea.stageId === selectedId && idea.kind !== 'hotel' && (filter === 'all' || idea.kind === filter) && (!search || `${idea.title} ${idea.details}`.toLocaleLowerCase('fr').includes(search)));
   $('#idea-list').replaceChildren(...ideas.map(renderIdea));
-  if (!ideas.length) $('#idea-list').append(el('p', { class: 'empty-state', text: filter === 'all' && !search ? 'La page est ouverte. Ajoutez un hôtel, une balade ou une adresse à explorer ensemble.' : 'Aucune idée ne correspond à ce filtre.' }));
+  if (!ideas.length) $('#idea-list').append(el('p', { class: 'empty-state', text: filter === 'all' && !search ? 'Ajoutez une balade, un restaurant ou une adresse à explorer ensemble.' : 'Aucune idée ne correspond à ce filtre.' }));
 }
-function renderHighlights(stage, previous) {
-  const ideas = Object.values(state.data.ideas).filter((idea) => idea.stageId === stage.id);
-  const highlights = [['hotel', 'Où se poser'], ['activite', 'À vivre sur place']].map(([kind, title]) => {
-    const options = ideas.filter((idea) => kind === 'hotel' ? idea.kind === kind : !['hotel', 'trajet', 'materiel'].includes(idea.kind));
-    const chosen = options.filter((idea) => ['retenu', 'reserve'].includes(idea.status));
-    const loved = options.filter((idea) => idea.voteA && idea.voteB);
-    const selected = chosen.length ? chosen : loved;
-    const summary = selected.length ? selected.map((idea) => `${idea.title}${idea.status === 'reserve' ? ' (réservé)' : ''}`).join(' · ') : options.length ? `${options.length} piste${options.length > 1 ? 's' : ''} à comparer` : 'À imaginer ensemble';
-    const button = el('button', { type: 'button', class: 'text-button', text: 'Voir les idées' });
-    button.addEventListener('click', () => { filter = kind === 'hotel' ? kind : 'all'; renderDetail(); $('#kind-filters').scrollIntoView({ block: 'start' }); $(`[data-kind="${filter}"]`).focus({ preventScroll: true }); });
-    return el('div', {}, [el('h3', { text: title }), el('p', { text: summary }), button]);
-  });
-  const flights = Object.values(state.data.flights).filter((flight) => flight.toStageId === stage.id || flight.fromStageId === stage.id);
-  const travel = el('div', {}, [el('h3', { text: 'Le prochain mouvement' }), el('p', { text: flights.length ? `${flights.length} vol${flights.length > 1 ? 's' : ''} associé${flights.length > 1 ? 's' : ''} à cette étape` : previous ? `Depuis ${previous.place}. Moyen de transport et durée à préciser.` : 'La première escale du voyage.' })]);
-  if (flights.length) {
-    const link = el('button', { class: 'text-button', type: 'button', text: 'Consulter les vols' }); link.addEventListener('click', () => showView('vols', true)); travel.append(link);
-  } else if (previous) travel.append(el('a', { class: 'text-button', href: `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(`${previous.lat},${previous.lng}`)}&destination=${encodeURIComponent(`${stage.lat},${stage.lng}`)}`, target: '_blank', rel: 'noopener noreferrer', text: 'Comparer les itinéraires' }));
-  $('#stage-highlights').replaceChildren(...highlights, travel);
+function renderHighlights() {
+  $('#stage-highlights').replaceChildren(...[['Hébergements', '#hotels-title'], ['Adresses et activités', '#ideas-title'], ['Notes du séjour', '#stage-notebook']].map(([text, target]) => {
+    const button = el('button', { type: 'button', class: 'text-button', text });
+    button.addEventListener('click', () => { const node = $(target); if (node.tagName === 'DETAILS') node.open = true; node.tabIndex = -1; node.scrollIntoView({ block: 'start' }); node.focus({ preventScroll: true }); }); return button;
+  }));
 }
 function renderIdea(idea) {
   const title = el('h4', { text: idea.title });
@@ -204,7 +226,8 @@ function renderIdea(idea) {
   const planned = idea.date ? `${day(idea.date)}${idea.time ? ` · ${idea.time}${idea.endTime ? ` à ${idea.endTime}${idea.endTime < idea.time ? ' le lendemain' : ''}` : ''} (heure locale)` : ''}` : 'À choisir sur place';
   article.append(el('p', { class: 'idea-schedule', text: `${owner} · ${planned}` }));
   if (idea.address) article.append(el('a', { class: 'idea-source', text: idea.address, href: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(idea.address + ', ' + state.data.stages[idea.stageId].place)}`, target: '_blank', rel: 'noopener noreferrer' }));
-  if (idea.cost !== null) article.append(el('p', { class: 'idea-price' }, [el('strong', { text: euro.format(idea.cost) }), el('small', { text: idea.kind === 'hotel' ? ' / nuit pour deux · à confirmer' : ' pour deux · à confirmer' })]));
+  if (idea.cost !== null) article.append(el('p', { class: 'idea-price' }, [el('strong', { text: euro.format(idea.cost) }), el('small', { text: ` · ${{ historical: 'ancien tarif', checked: 'offre vérifiée', estimate: 'estimation', unknown: 'origine à préciser' }[idea.priceBasis || 'estimate']}` })]));
+  if (idea.priceNote) article.append(el('p', { class: 'small-note', text: idea.priceNote }));
   if (idea.url) article.append(el('a', { class: 'idea-source', href: idea.url, target: '_blank', rel: 'noopener noreferrer', text: 'Voir la source ↗' }));
   const votes = el('div', { class: 'votes', role: 'group', 'aria-label': `Envies pour ${idea.title}` });
   for (const suffix of ['A', 'B']) {
@@ -225,7 +248,8 @@ function closeEditor(kind) {
   $(`#${kind}-editor`).hidden = true;
   if (kind === 'stage') { stageEditing = false; journeyMap?.cancelPick(); } else ideaEditing = false;
   form.dataset.dirty = 'false';
-  $(kind === 'stage' ? '#edit-stage' : '#add-idea').focus({ preventScroll: true });
+  const returnTarget = journeyArea === 'overview' ? '#add-stage-overview' : journeyArea === 'map' ? '#map-back' : kind === 'stage' ? '#edit-stage' : '#add-idea';
+  $(returnTarget).focus({ preventScroll: true });
   if (kind === 'idea' && ideaReturnView === 'agenda') showView('agenda', true);
 }
 function openStage(id) {
@@ -256,9 +280,10 @@ function updateLocationLabel() {
 function openIdea(id, defaults = {}, returnView = 'parcours') {
   if (ideaEditing && $('#idea-form').dataset.dirty === 'true' && !confirm('Remplacer l\'idée en cours de saisie ?')) return;
   ideaReturnView = returnView;
+  showJourneyArea('stage');
   const form = $('#idea-form'); form.reset(); form.dataset.dirty = 'false'; $('#idea-error').textContent = '';
   ideaOriginal = id ? clone(state.data.ideas[id]) : null;
-  const values = ideaOriginal ?? { title: '', kind: filter === 'all' ? 'hotel' : filter, url: '', cost: null, status: 'explorer', details: '', owner: 'both', date: '', time: '', endTime: '', address: '', ...defaults };
+  const values = ideaOriginal ?? { title: '', kind: filter === 'all' ? 'activite' : filter, url: '', cost: null, status: 'explorer', details: '', owner: 'both', date: '', time: '', endTime: '', address: '', imageUrl: '', imageCredit: '', imageSource: '', room: '', comfort: '', locationNote: '', priceBasis: 'unknown', priceNote: '', ...defaults };
   for (const [key, value] of Object.entries(values)) if (formField(form, key)) formField(form, key).value = value ?? '';
   form.dataset.stageId = ideaOriginal?.stageId ?? selectedId;
   $('#idea-form-heading').textContent = id ? 'Modifier l\'idée' : `Une nouvelle idée pour ${state.data.stages[form.dataset.stageId].title}`;
@@ -272,7 +297,7 @@ $('#stage-form').addEventListener('submit', (event) => {
     if (fields.lat === '' || fields.lng === '') throw new Error('Place le repère sur la carte, choisis un lieu du carnet ou indique ses coordonnées.');
     const coordinates = { lat: Number(fields.lat), lng: Number(fields.lng) };
     const id = stageOriginal?.id ?? uid();
-    if (updateRecord('stages', id, stageOriginal, { ...fields, ...coordinates, id })) { journeyMap?.cancelPick(); selectedId = id; stageEditing = false; form.dataset.dirty = 'false'; $('#stage-editor').hidden = true; render(); $('#etape').scrollIntoView({ block: 'start' }); $('#detail-title').focus({ preventScroll: true }); }
+    if (updateRecord('stages', id, stageOriginal, { ...fields, ...coordinates, id })) { journeyMap?.cancelPick(); selectedId = id; stageEditing = false; form.dataset.dirty = 'false'; $('#stage-editor').hidden = true; render(); showJourneyArea('stage'); $('#etape').scrollIntoView({ block: 'start' }); $('#detail-title').focus({ preventScroll: true }); }
   } catch (error) { $('#stage-error').textContent = error.message; }
 });
 $('#idea-form').addEventListener('submit', (event) => {
@@ -295,6 +320,16 @@ for (const kind of ['stage', 'idea']) {
   $(`#cancel-${kind}`).addEventListener('click', () => closeEditor(kind));
 }
 $('#add-stage').addEventListener('click', () => openStage());
+$('#add-stage-overview').addEventListener('click', () => openStage());
+$('#add-hotel').addEventListener('click', () => openIdea(undefined, { kind: 'hotel' }));
+$('#overview-map').addEventListener('click', () => openMap('all'));
+$('#stage-map').addEventListener('click', () => openMap('selected'));
+$('#back-overview').addEventListener('click', () => { showJourneyArea('overview'); $('#trip-title').tabIndex = -1; $('#trip-title').focus(); });
+$('#map-back').addEventListener('click', () => {
+  const area = mapReturnArea === 'stage' && state.data.stages[selectedId] ? 'stage' : 'overview';
+  showJourneyArea(area);
+  const title = $(area === 'stage' ? '#detail-title' : '#trip-title'); title.tabIndex = -1; title.focus();
+});
 $('#edit-stage').addEventListener('click', () => openStage(selectedId));
 $('#add-idea').addEventListener('click', () => openIdea());
 $('#delete-stage').addEventListener('click', () => {
@@ -308,14 +343,14 @@ $('#delete-stage').addEventListener('click', () => {
   commit(next);
 });
 $('#known-place').addEventListener('change', (event) => { if (event.target.value) setLocation(...event.target.value.split(',').map(Number)); });
-$('#pick-location').addEventListener('click', () => { if (!globalThis.L) { $('#stage-error').textContent = 'La carte ne charge pas. Choisis une ville dans la liste.'; return; } journeyMap.startPick(); feedback('Clique sur la carte pour placer cette étape.'); });
+$('#pick-location').addEventListener('click', () => { openMap('all'); if (!journeyMap?.startPick()) { $('#stage-error').textContent = 'La carte se prépare ou ne peut pas être affichée. Réessaie dans un instant, ou utilise les coordonnées.'; return; } feedback('Clique sur la carte pour placer cette étape.'); });
 for (const [name, scope] of [['all', 'all'], ['stage', 'selected'], ['leg', 'leg']]) $(`#map-${name}`).addEventListener('click', () => { journeyMap?.fit(scope); setMapScope(scope); });
 $('#map-expand').addEventListener('click', () => {
   const expanded = $('#map-shell').classList.toggle('expanded');
   $('#map-expand').textContent = expanded ? 'Réduire' : 'Agrandir'; $('#map-expand').setAttribute('aria-expanded', String(expanded));
   journeyMap?.resize();
 });
-$('#explore-stage').addEventListener('click', () => { $('#etape').scrollIntoView({ block: 'start' }); $('#detail-title').focus({ preventScroll: true }); });
+$('#explore-stage').addEventListener('click', () => { showJourneyArea('stage'); $('#etape').scrollIntoView({ block: 'start' }); $('#detail-title').focus({ preventScroll: true }); });
 for (const [direction, delta] of [['previous', -1], ['next', 1]]) $(`#${direction}-stage`).addEventListener('click', () => {
   const stages = sortedStages(state.data), next = stages[stages.findIndex((s) => s.id === selectedId) + delta]; if (next) selectStage(next.id);
 });

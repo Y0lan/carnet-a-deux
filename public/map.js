@@ -1,3 +1,8 @@
+const position = (stage) => [stage.lng, stage.lat];
+const connectionKey = (from, to) => [from, to].sort().join('|');
+const samePoint = (a, b) => a.lat === b.lat && a.lng === b.lng;
+const emptyRoutes = () => ({ type: 'FeatureCollection', features: [] });
+
 function label(text, className) {
   const node = document.createElement('span');
   node.textContent = text;
@@ -5,68 +10,54 @@ function label(text, className) {
   return node;
 }
 
-const position = (stage) => [stage.lat, stage.lng];
-const connectionKey = (from, to) => [from, to].sort().join('|');
-const samePoint = (a, b) => a.lat === b.lat && a.lng === b.lng;
-
 export function createJourneyMap({ onSelect, onPick }) {
+  const container = document.querySelector('#map');
   const warning = document.querySelector('#map-warning');
-  if (!globalThis.L) {
-    if (warning) warning.hidden = false;
-    return { render() {}, fit() {}, select() {}, startPick() {}, cancelPick() {}, resize() {} };
-  }
-  const map = L.map('map', { scrollWheelZoom: false, zoomControl: true }).setView([47, 11], 5);
-  map.createPane('country-outline').style.zIndex = '150';
-  fetch(new URL('./vendor/countries.geojson', import.meta.url)).then((response) => {
-    if (!response.ok) throw new Error('Fond local absent.');
-    return response.json();
-  }).then((data) => L.geoJSON(data, {
-    pane: 'country-outline', interactive: false,
-    style: { color: '#b6c4ae', weight: 1, fillColor: '#eff0e4', fillOpacity: 1 },
-  }).addTo(map)).catch(() => {});
-  const tiles = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 18,
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-  }).addTo(map);
-  tiles.on('tileerror', () => { if (warning) warning.hidden = false; });
-  tiles.on('tileload', () => { if (warning) warning.hidden = true; });
-  const markers = L.layerGroup().addTo(map);
-  const routes = L.layerGroup().addTo(map);
-  let stages = [];
-  let selectedId = '';
-  let picking = false;
-  let pickMarker;
-  let firstRender = true;
   const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
   const date = new Intl.DateTimeFormat('fr-FR', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+  let library, map, ready = false, failed = false;
+  let stages = [], selectedId = '', flights = [], markers = [], popup;
+  let picking = false, pickMarker;
+  let cameraPending = { type: 'fit', scope: 'all' };
 
+  function warn(message) {
+    if (!warning) return;
+    warning.textContent = message;
+    warning.hidden = !message;
+  }
+  function closePopup() { popup?.remove(); popup = undefined; }
   function cancelPick() {
     picking = false;
-    map.getContainer().style.cursor = '';
-    if (pickMarker) { pickMarker.remove(); pickMarker = undefined; }
+    if (map) map.getCanvas().style.cursor = '';
+    pickMarker?.remove(); pickMarker = undefined;
   }
-  function pick(latlng) {
-    cancelPick();
-    pickMarker = L.circleMarker(latlng, { color: '#a84c36', radius: 9, interactive: false }).addTo(map);
-    onPick(latlng.lat, latlng.lng);
+  function pick(lngLat) {
+    cancelPick(); closePopup();
+    const point = document.createElement('span');
+    point.className = 'map-pick-marker';
+    point.setAttribute('aria-hidden', 'true');
+    pickMarker = new library.Marker({ element: point }).setLngLat([lngLat.lng, lngLat.lat]).addTo(map);
+    onPick(lngLat.lat, lngLat.lng);
   }
-  map.on('click', (event) => { if (picking) pick(event.latlng); });
-  map.getContainer().addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && picking) cancelPick();
-  });
 
-  function fit(scope = 'all') {
-    let points = stages;
+  function applyCamera() {
+    if (!ready || !cameraPending || !stages.length || !container.clientWidth || !container.clientHeight) return;
+    const command = cameraPending;
     const index = stages.findIndex((stage) => stage.id === selectedId);
-    if (scope === 'selected') points = index < 0 ? [] : [stages[index]];
-    if (scope === 'leg') {
-      points = index < 0 ? [] : index > 0 ? stages.slice(index - 1, index + 1) : stages.slice(0, 2);
+    if (command.type === 'select') {
+      const stage = stages.find((item) => item.id === command.id);
+      if (stage) map.easeTo({ center: position(stage), zoom: 11, bearing: 0, pitch: 0, duration: reduceMotion ? 0 : 300 });
+    } else {
+      let points = stages;
+      if (command.scope === 'selected') points = index < 0 ? [] : [stages[index]];
+      if (command.scope === 'leg') points = index < 0 ? [] : index > 0 ? stages.slice(index - 1, index + 1) : stages.slice(0, 2);
+      if (points.length) {
+        const bounds = new library.LngLatBounds();
+        for (const stage of points) bounds.extend(position(stage));
+        map.fitBounds(bounds, { padding: 42, maxZoom: command.scope === 'selected' ? 12 : 10, bearing: 0, pitch: 0, duration: reduceMotion ? 0 : 300 });
+      }
     }
-    // Preserve the former shortcut for an already-open version of the interface.
-    if (scope === 'italy') points = stages.filter((s) => s.lat > 36 && s.lat < 47.5 && s.lng > 6 && s.lng < 19);
-    if (!points.length) return;
-    map.invalidateSize();
-    map.fitBounds(points.map(position), { padding: [42, 42], maxZoom: scope === 'selected' ? 12 : 10, animate: !reduceMotion });
+    cameraPending = null;
   }
 
   function stagePicker(group) {
@@ -81,59 +72,27 @@ export function createJourneyMap({ onSelect, onPick }) {
         `${date.format(new Date(`${stage.start}T12:00:00Z`))} au ${date.format(new Date(`${stage.end}T12:00:00Z`))}`,
         'map-stop-date',
       ));
-      button.addEventListener('click', () => { map.closePopup(); onSelect(stage.id); });
+      button.addEventListener('click', () => { closePopup(); onSelect(stage.id); });
       list.append(button);
     }
     return list;
   }
 
-  function render(nextStages, nextSelectedId, flights = []) {
-    stages = nextStages; selectedId = nextSelectedId;
-    routes.clearLayers();
-    const byId = new Map(stages.map((stage) => [stage.id, stage]));
-    const linkedFlights = flights.filter((flight) => byId.has(flight.fromStageId) && byId.has(flight.toStageId));
-    const flightPairs = new Set(linkedFlights.map((flight) => connectionKey(flight.fromStageId, flight.toStageId)));
-    for (let index = 1; index < stages.length; index++) {
-      const from = stages[index - 1], to = stages[index];
-      if (samePoint(from, to) || flightPairs.has(connectionKey(from.id, to.id))) continue;
-      const active = to.id === selectedId || (index === 1 && from.id === selectedId);
-      const line = L.polyline([position(from), position(to)], {
-        color: '#426959', weight: active ? 4 : 2, opacity: active ? .9 : .5, dashArray: '3 7',
-      });
-      line.bindTooltip(label(`${from.title} → ${to.title} · liaison indicative, transport à choisir`));
-      line.on('click', () => { if (!picking) onSelect(to.id); });
-      line.addTo(routes);
-    }
-    for (const flight of linkedFlights) {
-      const from = byId.get(flight.fromStageId), to = byId.get(flight.toStageId);
-      if (samePoint(from, to)) continue;
-      const active = from.id === selectedId || to.id === selectedId;
-      const line = L.polyline([position(from), position(to)], {
-        color: '#a84c36', weight: active ? 4 : 3, opacity: active ? .95 : .65, dashArray: '11 8',
-      });
-      line.bindTooltip(label(`${flight.title || 'Vol'} · repères des étapes, pas des aéroports`));
-      line.on('click', () => { if (!picking) onSelect(to.id); });
-      line.addTo(routes);
-    }
-    renderMarkers();
-    if (firstRender && stages.length) { firstRender = false; requestAnimationFrame(() => fit()); }
-  }
-
   function renderMarkers() {
-    markers.clearLayers();
-    const remaining = new Set(stages.map((stage, index) => ({
-      stage, index, point: map.latLngToContainerPoint(position(stage)),
-    })));
+    if (!ready) return;
+    closePopup();
+    for (const marker of markers) marker.remove();
+    markers = [];
+    const remaining = new Set(stages.map((stage, index) => ({ stage, index, point: map.project(position(stage)) })));
     const groups = [];
-    // Group overlapping markers at this zoom, without assuming shared cities.
+    // Le regroupement suit la distance à l'écran, sans supposer une ville commune.
     for (const first of remaining) {
       remaining.delete(first);
       const group = [first];
       for (let i = 0; i < group.length; i++) {
         for (const candidate of remaining) {
           if (Math.hypot(candidate.point.x - group[i].point.x, candidate.point.y - group[i].point.y) > 42) continue;
-          remaining.delete(candidate);
-          group.push(candidate);
+          remaining.delete(candidate); group.push(candidate);
         }
       }
       groups.push(group.sort((a, b) => a.index - b.index));
@@ -142,43 +101,100 @@ export function createJourneyMap({ onSelect, onPick }) {
       const selected = group.find(({ stage }) => stage.id === selectedId);
       const { stage, index } = selected ?? group[0];
       const active = Boolean(selected), grouped = group.length > 1;
-      const content = label(String(index + 1), 'map-pin-number');
-      if (grouped) content.append(label(`+${group.length - 1}`, 'map-pin-count'));
-      const size = grouped ? 42 : active ? 36 : 32;
-      const marker = L.marker(position(stage), {
-        icon: L.divIcon({
-          className: `map-pin${active ? ' selected' : ''}${grouped ? ' map-pin-group' : ''}`,
-          html: content, iconSize: [size, size], iconAnchor: [size / 2, size / 2],
-        }),
-        title: grouped ? `${group.length} étapes dans cette zone. Choisir une étape.` : `${index + 1}. ${stage.title}`,
-        keyboard: true, zIndexOffset: active ? 1000 : 0,
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = `map-pin${active ? ' selected' : ''}${grouped ? ' map-pin-group' : ''}`;
+      button.setAttribute('aria-label', grouped ? `${group.length} étapes dans cette zone. Choisir une étape.` : `${index + 1}. ${stage.title}`);
+      button.setAttribute('aria-current', String(active));
+      button.title = grouped ? `${group.length} étapes dans cette zone` : stage.title;
+      button.append(label(String(index + 1), 'map-pin-number'));
+      if (grouped) button.append(label(`+${group.length - 1}`, 'map-pin-count'));
+      button.addEventListener('click', (event) => {
+        event.stopPropagation();
+        if (picking) { pick({ lat: stage.lat, lng: stage.lng }); return; }
+        if (grouped) {
+          closePopup();
+          popup = new library.Popup({ offset: 24, maxWidth: '310px', closeButton: true, closeOnMove: true })
+            .setLngLat(position(stage)).setDOMContent(stagePicker(group)).addTo(map);
+        } else onSelect(stage.id);
       });
-      marker.bindTooltip(label(grouped ? `${group.length} étapes dans cette zone` : stage.title), { direction: 'top', offset: [0, -17] });
-      if (grouped) marker.bindPopup(stagePicker(group), { minWidth: 220, maxWidth: 300 });
-      marker.on('click', (event) => {
-        if (picking) { map.closePopup(); pick(event.latlng ?? { lat: stage.lat, lng: stage.lng }); return; }
-        if (grouped) marker.openPopup();
-        else onSelect(stage.id);
-      });
-      marker.addTo(markers);
+      markers.push(new library.Marker({ element: button, anchor: 'center' }).setLngLat(position(stage)).addTo(map));
     }
   }
-  map.on('zoomend', renderMarkers);
+
+  function routeData() {
+    const data = emptyRoutes();
+    const byId = new Map(stages.map((stage) => [stage.id, stage]));
+    const linked = flights.filter((flight) => byId.has(flight.fromStageId) && byId.has(flight.toStageId));
+    const flightPairs = new Set(linked.map((flight) => connectionKey(flight.fromStageId, flight.toStageId)));
+    function append(from, to, type, active) {
+      if (samePoint(from, to)) return;
+      data.features.push({ type: 'Feature', geometry: { type: 'LineString', coordinates: [position(from), position(to)] }, properties: { type, active, destination: to.id } });
+    }
+    for (let i = 1; i < stages.length; i++) {
+      const from = stages[i - 1], to = stages[i];
+      if (!flightPairs.has(connectionKey(from.id, to.id))) append(from, to, 'connection', to.id === selectedId || (i === 1 && from.id === selectedId));
+    }
+    for (const flight of linked) append(byId.get(flight.fromStageId), byId.get(flight.toStageId), 'flight', [flight.fromStageId, flight.toStageId].includes(selectedId));
+    return data;
+  }
+  function draw() {
+    if (!ready) return;
+    map.getSource('journey-routes').setData(routeData());
+    renderMarkers(); applyCamera();
+  }
+  function initialize(api) {
+    library = api;
+    api.setWorkerUrl(new URL('./vendor/maplibre-gl-worker.js', import.meta.url).href);
+    map = new api.Map({
+      container, style: 'https://tiles.openfreemap.org/styles/liberty', center: [11, 47], zoom: 4,
+      attributionControl: false, scrollZoom: false, dragRotate: false, pitchWithRotate: false,
+      touchPitch: false, cooperativeGestures: true, maxZoom: 18,
+      locale: { 'NavigationControl.ZoomIn': 'Zoomer', 'NavigationControl.ZoomOut': 'Dézoomer', 'Map.Title': 'Carte du voyage', 'CooperativeGesturesHandler.MobileHelpText': 'Utilise deux doigts pour déplacer la carte', 'Popup.Close': 'Fermer' },
+    });
+    map.addControl(new api.NavigationControl({ showCompass: false }), 'top-right');
+    map.addControl(new api.ScaleControl({ unit: 'metric' }), 'bottom-left');
+    map.addControl(new api.AttributionControl({ compact: false, customAttribution: '<a href="https://openfreemap.org/" target="_blank" rel="noopener noreferrer">OpenFreeMap</a> · <a href="https://openmaptiles.org/" target="_blank" rel="noopener noreferrer">OpenMapTiles</a> · © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a>' }), 'bottom-right');
+    map.getCanvas().setAttribute('aria-label', 'Carte du voyage. Utilise les flèches pour te déplacer et les boutons pour zoomer.');
+    map.getCanvas().addEventListener('keydown', (event) => { if (event.key === 'Escape') cancelPick(); });
+    map.on('click', (event) => {
+      if (picking) { pick(event.lngLat); return; }
+      if (!ready) return;
+      const destination = map.queryRenderedFeatures(event.point, { layers: ['journey-connection', 'journey-flight'] })[0]?.properties?.destination;
+      if (destination) onSelect(destination);
+    });
+    map.on('zoomend', renderMarkers);
+    map.on('error', () => warn('La carte ne charge pas complètement. Les étapes et les liens Google Maps restent disponibles.'));
+    map.on('load', () => {
+      map.addSource('journey-routes', { type: 'geojson', data: emptyRoutes() });
+      for (const [type, color, dash] of [['connection', '#376893', [1, 2.5]], ['flight', '#a84c36', [3, 2]]]) {
+        map.addLayer({ id: `journey-${type}`, type: 'line', source: 'journey-routes', filter: ['==', ['get', 'type'], type], paint: { 'line-color': color, 'line-width': ['case', ['get', 'active'], 4, 2.5], 'line-opacity': ['case', ['get', 'active'], .95, .55], 'line-dasharray': dash } });
+      }
+      ready = true; warn(''); draw();
+    });
+  }
+
+  // Le moteur et les tuiles ne sont chargés qu'après l'ouverture du carnet.
+  import('./vendor/maplibre-gl.js').then(initialize).catch(() => {
+    failed = true; ready = false;
+    try { map?.remove(); } catch { /* La création peut avoir échoué avant l'initialisation WebGL. */ }
+    map = undefined;
+    warn('Cette carte ne peut pas s’ouvrir sur cet appareil. Utilise les étapes, Google Maps ou la saisie des coordonnées.');
+  });
 
   return {
-    fit, render, cancelPick,
-    resize() { map.invalidateSize(); },
-    select(id) {
-      const stage = stages.find((item) => item.id === id);
-      if (!stage) return;
-      selectedId = id;
-      map.invalidateSize();
-      map.setView(position(stage), 11, { animate: !reduceMotion });
-    },
+    render(nextStages, nextSelectedId, nextFlights = []) { stages = nextStages; selectedId = nextSelectedId; flights = nextFlights; draw(); },
+    fit(scope = 'all') { cameraPending = { type: 'fit', scope }; map?.resize(); applyCamera(); },
+    select(id) { if (!stages.some((stage) => stage.id === id)) return; selectedId = id; cameraPending = { type: 'select', id }; map?.resize(); draw(); },
+    resize() { map?.resize(); if (ready) { renderMarkers(); applyCamera(); } },
+    cancelPick,
     startPick() {
-      cancelPick(); picking = true;
-      map.closePopup(); map.getContainer().style.cursor = 'crosshair';
+      if (!ready) { if (!failed) warn('La carte est en cours de chargement. Tu peux aussi saisir les coordonnées.'); return false; }
+      cancelPick(); closePopup(); picking = true;
+      map.getCanvas().style.cursor = 'crosshair';
       document.querySelector('#parcours')?.scrollIntoView({ block: 'start' });
+      map.getCanvas().focus({ preventScroll: true });
+      return true;
     },
   };
 }
