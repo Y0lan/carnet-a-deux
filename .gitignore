@@ -1,0 +1,9 @@
+.private/
+.wrangler/
+node_modules/
+output/
+*.log
+.DS_Store
+.superpowers/
+dist/
+

@@ -1,0 +1,13 @@
+{
+  "name": "carnet-a-deux",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node tools/dev.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "build": "node tools/build.mjs",
+    "deploy": "node tools/deploy.mjs"
+  },
+  "engines": { "node": ">=22.13" }
+}
