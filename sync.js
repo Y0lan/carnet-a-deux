@@ -1,4 +1,4 @@
-import { emptyData, validateData } from './schema.js';
+import { emptyData, validateData, migrateData } from './schema.js';
 
 const clone = value => value === undefined ? undefined : structuredClone(value);
 const missing = Symbol('missing');
@@ -32,7 +32,7 @@ export function mergeThreeWay(base, local, remote) {
   }
   let data = clone(visit(base, local, remote, ''));
   // Valid changes can interact through dates or stage references.
-  if (data?.schemaVersion === 1) {
+  if ([1, 2].includes(data?.schemaVersion)) {
     try { validateData(data); }
     catch {
       conflicts.push('/');
@@ -48,8 +48,7 @@ async function storageKey(endpoint, token) {
 }
 function validEnvelope(value) {
   if (!value || typeof value !== 'object' || Object.keys(value).length !== 3 || !Number.isSafeInteger(value.revision) || value.revision < 0 || typeof value.updatedAt !== 'string' || value.updatedAt.length > 40 || !Number.isFinite(Date.parse(value.updatedAt))) throw new Error('La réponse du serveur est invalide.');
-  validateData(value.data);
-  return value;
+  return { ...value, data: migrateData(value.data) };
 }
 class SyncError extends Error {
   constructor(message, status = 'error') { super(message); this.status = status; }
@@ -137,16 +136,19 @@ export class SyncClient {
       if (raw.length > 4 * 1024 * 1024) throw new Error();
       const saved = JSON.parse(raw);
       if (saved.version !== 1 || Object.keys(saved).length !== 5 || !['base', 'local', 'pending', 'conflict'].every(field => Object.hasOwn(saved, field))) throw new Error();
-      if (saved.base !== null) validEnvelope(saved.base);
-      if (saved.local !== null) validateData(saved.local);
+      if (saved.base !== null) saved.base = validEnvelope(saved.base);
+      if (saved.local !== null) saved.local = migrateData(saved.local);
       if (saved.base && !saved.local) throw new Error();
       if (saved.pending !== null) {
         if (!saved.base || !saved.local || Object.keys(saved.pending).length !== 3 || !Number.isSafeInteger(saved.pending.revision) || saved.pending.revision < 0 || typeof saved.pending.writeId !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(saved.pending.writeId)) throw new Error();
-        validateData(saved.pending.data);
+        const originalData = saved.pending.data;
+        saved.pending.data = migrateData(saved.pending.data);
+        // A migrated payload must not reuse an id acknowledged for different bytes.
+        if (!same(originalData, saved.pending.data)) saved.pending.writeId = crypto.randomUUID();
       }
       if (saved.conflict !== null) {
         if (!saved.base || !saved.local || saved.pending || Object.keys(saved.conflict).length !== 3) throw new Error();
-        for (const field of ['base', 'local', 'remote']) validateData(saved.conflict[field]);
+        for (const field of ['base', 'local', 'remote']) saved.conflict[field] = migrateData(saved.conflict[field]);
       }
       this.base = saved.base;
       this.data = saved.local;
@@ -198,7 +200,7 @@ export class SyncClient {
 
   change(data) {
     this._requireReady();
-    validateData(data);
+    data = migrateData(data);
     if (!this.key) throw new SyncError('Attendez la première connexion avant de modifier le carnet.');
     this.data = clone(data);
     if (this.conflict) this.conflict.local = clone(data);
@@ -265,6 +267,7 @@ export class SyncClient {
     if (response.status !== 200 && response.status !== 409) {
       if (response.status === 401) throw new SyncError('Le code d’accès est incorrect.');
       if (response.status === 403) throw new SyncError('Cette origine n’est pas autorisée.');
+      if (response.status === 426) throw new SyncError('Le carnet utilise une version plus récente. Recharge la page ; ton brouillon reste conservé.');
       if (response.status >= 500) throw new SyncError('Le service est indisponible. Le brouillon reste sur cet appareil.', 'offline');
       throw new SyncError('Le serveur a refusé la sauvegarde. Le brouillon reste sur cet appareil.');
     }
