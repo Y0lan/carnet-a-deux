@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import worker, { MAX_BODY_BYTES } from '../worker/index.js';
-import { emptyData, validateData, isCivilDate, nightsBetween, sortedStages, MAX_DOCUMENT_BYTES } from '../public/schema.js';
+import { emptyData, validateData, migrateData, flightInstant, flightDurationMinutes, isCivilDate, nightsBetween, sortedStages, MAX_DOCUMENT_BYTES } from '../public/schema.js';
 import { mergeThreeWay, SyncClient } from '../public/sync.js';
 
 const token = 'a-test-access-code-at-least-32-characters';
@@ -13,10 +13,10 @@ const endpoint = 'https://service.example/api/trip';
 const clone = value => structuredClone(value);
 const migration = readFileSync(new URL('../worker/migration.sql', import.meta.url), 'utf8');
 function stage(id = 'paris', extra = {}) {
-  return { id, title: 'Paris', place: 'Paris, France', lat: 48.85, lng: 2.35, start: '2027-03-27', end: '2027-03-30', mood: 'culture', status: 'explorer', notes: '', ...extra };
+  return { id, title: 'Paris', place: 'Paris, France', lat: 48.85, lng: 2.35, start: '2027-03-27', end: '2027-03-30', mood: 'culture', status: 'explorer', notes: '', experience: '', imageUrl: '', imageCredit: '', imageSource: '', ...extra };
 }
 function idea(id = 'hotel', extra = {}) {
-  return { id, stageId: 'paris', kind: 'hotel', title: 'Un hôtel', url: 'https://example.com/hotel', details: '', cost: 100, status: 'envie', voteA: false, voteB: false, ...extra };
+  return { id, stageId: 'paris', kind: 'hotel', title: 'Un hôtel', url: 'https://example.com/hotel', details: '', cost: 100, status: 'envie', voteA: false, voteB: false, date: '', time: '', endTime: '', address: '', owner: 'both', ...extra };
 }
 function notebook() {
   const data = emptyData(); data.stages.paris = stage(); data.ideas.hotel = idea(); return data;
@@ -122,7 +122,7 @@ test('authentification, CORS, absence de cache et erreurs sans secret', async t 
   const good = await request();
   assert.equal(good.status, 200); assert.equal(good.headers.get('Access-Control-Allow-Origin'), origin);
   assert.equal(good.headers.get('Vary'), 'Origin'); assert.equal(good.headers.get('Cache-Control'), 'no-store');
-  assert.deepEqual((await good.json()).data, emptyData());
+  assert.deepEqual(migrateData((await good.json()).data), emptyData());
   const preflight = await request('OPTIONS', undefined, { headers: { Authorization: '', 'Access-Control-Request-Method': 'PUT', 'Access-Control-Request-Headers': 'Authorization, Content-Type' } });
   assert.equal(preflight.status, 204);
   assert.equal((await request('OPTIONS', undefined, { headers: { 'Access-Control-Request-Method': 'DELETE' } })).status, 403);
@@ -437,4 +437,239 @@ test('navigateur sans Web Locks : refus avant lecture et écriture du cache', as
   assert.equal(c.last().status, 'error'); assert.match(c.last().error, /navigateur récent/);
   await c.sync.refresh(); assert.throws(() => c.sync.change(emptyData()), /fermé/);
   assert.equal(calls, 0); assert.equal(storage.items.size, 0);
+});
+
+function legacyData(value = notebook()) {
+  const data = clone(value);
+  data.schemaVersion = 1;
+  delete data.flights; delete data.shopping;
+  for (const stage of Object.values(data.stages)) for (const field of ['experience', 'imageUrl', 'imageCredit', 'imageSource']) delete stage[field];
+  for (const idea of Object.values(data.ideas)) for (const field of ['date', 'time', 'endTime', 'address', 'owner']) delete idea[field];
+  return data;
+}
+function flight(extra = {}) {
+  return { id: 'f1', title: 'Premier vol', from: 'Départ', to: 'Arrivée', departure: '', arrival: '', departureZone: '', arrivalZone: '', number: '', traveler: 'both', status: 'explorer', url: '', notes: '', fromStageId: '', toStageId: '', ...extra };
+}
+function shopping(extra = {}) {
+  return { id: 's1', title: 'Un objet', category: 'camping', owner: 'both', status: 'comparer', url: '', cost: null, currency: 'EUR', notes: '', stageId: '', voteA: false, voteB: false, ...extra };
+}
+
+test('migration v1 : mêmes notes, préférences et identifiants, sans mutation ni perte', () => {
+  const legacy = legacyData(); legacy.ideas.hotel.voteB = true; legacy.stages.paris.notes = 'Note privée de test';
+  const before = clone(legacy); const current = migrateData(legacy);
+  assert.equal(validateData(legacy), legacy); assert.equal(current.schemaVersion, 2);
+  assert.deepEqual(legacy, before); assert.deepEqual(legacyData(current).ideas, legacy.ideas);
+  assert.deepEqual(current.trip, legacy.trip); assert.deepEqual(current.flights, {}); assert.deepEqual(current.shopping, {});
+  assert.deepEqual(legacyData(current), legacy); assert.deepEqual(migrateData(current), current);
+  assert.equal(current.stages.paris.experience, '');
+});
+
+test('vols : heures locales, changement de date, décalages fractionnaires et durée réelle', () => {
+  assert.equal(flightInstant('', ''), null);
+  assert.equal(flightInstant('2027-01-12T12:00', 'Europe/Paris'), Date.parse('2027-01-12T11:00:00Z'));
+  assert.equal(flightInstant('2027-08-12T12:00', 'Europe/Paris'), Date.parse('2027-08-12T10:00:00Z'));
+  assert.equal(flightInstant('2027-01-12T12:00', 'Asia/Kathmandu'), Date.parse('2027-01-12T06:15:00Z'));
+  assert.equal(flightInstant('2027-01-12T00:00', 'Pacific/Auckland'), Date.parse('2027-01-11T11:00:00Z'));
+  const overnight = flight({ departure: '2027-01-12T23:00', arrival: '2027-01-13T08:00', departureZone: 'America/New_York', arrivalZone: 'Europe/Paris' });
+  assert.equal(flightDurationMinutes(overnight), 180);
+  assert.equal(flightDurationMinutes(flight({ departure: '2027-01-12T23:00', departureZone: 'UTC' })), null);
+  assert.throws(() => flightInstant('2027-03-28T02:30', 'Europe/Paris'), /n’existe pas/);
+  assert.throws(() => flightInstant('2027-10-31T02:30', 'Europe/Paris'), /se répète/);
+  for (const local of ['2027-02-29T12:00', '2027-01-01T24:00', '2027-01-01T12:60', '2027-01-01T12:00Z']) assert.throws(() => flightInstant(local, 'UTC'));
+  assert.throws(() => flightInstant('2027-01-01T12:00', 'Invalid/Zone'));
+});
+
+test('validation v2 : vols, shopping, sources des photos et références', () => {
+  const original = notebook(); original.flights.f1 = flight(); original.shopping.s1 = shopping();
+  assert.equal(validateData(original), original);
+  for (const mutate of [
+    data => { data.flights.f1.departure = '2027-01-01T12:00'; },
+    data => { data.flights.f1.arrivalZone = 'Invalid/Zone'; },
+    data => { data.flights.f1.fromStageId = 'missing'; },
+    data => { data.flights.f1.traveler = 'other'; },
+    data => { data.flights.f1.status = 'paid'; },
+    data => { data.flights.f1.number = 'x'.repeat(81); },
+    data => { data.shopping.s1.stageId = 'missing'; },
+    data => { data.shopping.s1.cost = -5; },
+    data => { data.shopping.s1.currency = 'XXX'; },
+    data => { data.shopping.s1.owner = ''; },
+    data => { data.shopping.s1.voteA = 1; },
+    data => { data.shopping.s1.category = 'unknown'; },
+    data => { data.stages.paris.imageUrl = 'http://example.com/photo.jpg'; },
+    data => { data.stages.paris.imageSource = 'javascript:alert(1)'; }
+  ]) { const data = clone(original); mutate(data); assert.throws(() => validateData(data)); }
+  const reversed = clone(original);
+  Object.assign(reversed.flights.f1, { departure: '2027-01-12T18:00', arrival: '2027-01-12T21:00', departureZone: 'Europe/Paris', arrivalZone: 'Asia/Tokyo' });
+  assert.throws(() => validateData(reversed), /arrivée doit suivre/);
+  original.stages.paris.imageUrl = 'https://example.com/photo.jpg';
+  original.stages.paris.imageSource = 'https://example.com/credit';
+  original.shopping.s1.stageId = 'paris'; original.flights.f1.toStageId = 'paris';
+  assert.doesNotThrow(() => validateData(original));
+});
+
+test('Worker : une ancienne interface ne peut pas effacer les nouvelles collections', async t => {
+  const server = service(t);
+  const old = legacyData();
+  assert.equal((await server.request('PUT', { revision: 0, writeId: 'legacy', data: old })).status, 200);
+  const upgraded = migrateData(old); upgraded.shopping.s1 = shopping(); upgraded.flights.f1 = flight();
+  assert.equal((await server.request('PUT', { revision: 1, writeId: 'upgrade', data: upgraded })).status, 200);
+  old.trip.title = 'Ancien navigateur';
+  const rejected = await server.request('PUT', { revision: 2, writeId: 'legacy-late', data: old });
+  assert.equal(rejected.status, 426); assert.match((await rejected.json()).error, /Recharge/);
+  const after = await (await server.request()).json();
+  assert.equal(after.revision, 2); assert.deepEqual(after.data, upgraded);
+});
+
+test('cache v1 : migration d’un brouillon non envoyé puis fusion avec les choix distants', async t => {
+  const server = service(t); const storage = new Storage(); const first = client(t, server.fetcher, storage);
+  await first.sync.start(); first.sync.stop();
+  const key = [...storage.items.keys()][0]; const cache = JSON.parse(storage.getItem(key));
+  cache.base.data = legacyData(); cache.local = legacyData(); cache.local.trip.personA = 'Modification locale';
+  storage.setItem(key, JSON.stringify(cache));
+  const remote = notebook(); remote.shopping.s1 = shopping();
+  await server.request('PUT', { revision: 0, writeId: 'new-interface', data: remote });
+  const restored = client(t, server.fetcher, storage); await restored.sync.start();
+  await until(() => restored.last().status === 'saved');
+  assert.equal(restored.last().data.schemaVersion, 2); assert.equal(restored.last().data.trip.personA, 'Modification locale');
+  assert.deepEqual(restored.last().data.shopping.s1, shopping());
+});
+
+test('cache v1 : réponse perdue migrée sans réutiliser l’identifiant ni doubler une écriture', async t => {
+  const server = service(t); const storage = new Storage(); const first = client(t, server.fetcher, storage);
+  await first.sync.start(); first.sync.stop();
+  const key = [...storage.items.keys()][0]; const cache = JSON.parse(storage.getItem(key));
+  cache.base.data = legacyData(); cache.local = legacyData(); cache.local.trip.title = 'Ancien brouillon';
+  cache.pending = { revision: 0, writeId: 'legacy-pending', data: clone(cache.local) };
+  assert.equal((await server.request('PUT', cache.pending)).status, 200);
+  storage.setItem(key, JSON.stringify(cache)); let sent;
+  const restored = client(t, (url, init) => { if (init.method === 'PUT') sent = JSON.parse(init.body); return server.fetcher(url, init); }, storage);
+  await restored.sync.start();
+  assert.equal(restored.last().status, 'saved'); assert.equal(restored.last().revision, 1);
+  assert.equal(restored.last().data.trip.title, 'Ancien brouillon');
+  assert.notEqual(sent.writeId, 'legacy-pending'); assert.equal(sent.data.schemaVersion, 2);
+  assert.equal(server.db.prepare('SELECT revision FROM trip').get().revision, 1);
+});
+
+test('cache v1 : conflit conservé après migration, choix explicite et données v2 préservées', async t => {
+  const server = service(t); const storage = new Storage(); const first = client(t, server.fetcher, storage);
+  await first.sync.start(); first.sync.stop();
+  const key = [...storage.items.keys()][0]; const cache = JSON.parse(storage.getItem(key));
+  cache.base.data = legacyData(); cache.base.data.trip.title = 'Distant';
+  cache.local = legacyData(); cache.local.trip.title = 'Local';
+  cache.conflict = { base: legacyData(), local: clone(cache.local), remote: clone(cache.base.data) };
+  storage.setItem(key, JSON.stringify(cache));
+  const remote = migrateData(cache.base.data); remote.shopping.s1 = shopping();
+  await server.request('PUT', { revision: 0, writeId: 'new-data', data: remote });
+  const restored = client(t, server.fetcher, storage); await restored.sync.start();
+  assert.equal(restored.last().status, 'conflict'); assert.deepEqual(restored.last().conflicts, ['/trip/title']);
+  restored.sync.resolveConflict('local'); await until(() => restored.last().status === 'saved');
+  assert.equal(restored.last().data.trip.title, 'Local'); assert.deepEqual(restored.last().data.shopping.s1, shopping());
+});
+
+test('deux appareils : votes shopping et horaire du vol fusionnés sans perte', async t => {
+  const server = service(t); const data = notebook(); data.shopping.s1 = shopping(); data.flights.f1 = flight();
+  await server.request('PUT', { revision: 0, writeId: 'initial-v2', data });
+  const a = client(t, server.fetcher); const b = client(t, server.fetcher);
+  await Promise.all([a.sync.start(), b.sync.start()]);
+  const left = clone(a.last().data); left.shopping.s1.voteA = true; left.flights.f1.departure = '2027-01-12T12:00'; left.flights.f1.departureZone = 'Europe/Paris';
+  const right = clone(b.last().data); right.shopping.s1.voteB = true; right.flights.f1.arrival = '2027-01-12T13:00'; right.flights.f1.arrivalZone = 'Europe/London';
+  a.sync.change(left); b.sync.change(right);
+  await until(() => a.last().status === 'saved' && b.last().status === 'saved' && Math.max(a.last().revision, b.last().revision) === 3);
+  await a.sync.refresh();
+  assert.equal(a.last().data.shopping.s1.voteA, true); assert.equal(a.last().data.shopping.s1.voteB, true);
+  assert.equal(flightDurationMinutes(a.last().data.flights.f1), 120);
+  const base = a.last().data; const local = clone(base); const remote = clone(base);
+  local.flights.f1.departure = '2027-01-12T13:00'; remote.flights.f1.departure = '2027-01-12T11:00';
+  assert.deepEqual(mergeThreeWay(base, local, remote).conflicts, ['/flights/f1/departure']);
+  local.flights.f1.departure = base.flights.f1.departure;
+  delete local.stages.paris; delete local.ideas.hotel;
+  remote.shopping.s1.stageId = 'paris';
+  assert.ok(mergeThreeWay(base, local, remote).conflicts.includes('/'));
+});
+
+test('Worker : la protection v2 reste atomique pendant une écriture v1 concurrente', async t => {
+  const server = service(t); const original = server.env.DB;
+  let enter, release;
+  const entered = new Promise(resolve => { enter = resolve; });
+  server.env.DB = { prepare(sql) {
+    const statement = original.prepare(sql); let parameters = [];
+    return {
+      bind(...values) { parameters = values; statement.bind(...values); return this; },
+      async first() {
+        if (sql.startsWith('UPDATE') && parameters[2] === 'legacy-race') {
+          enter(); await new Promise(resolve => { release = resolve; });
+        }
+        return statement.first();
+      }
+    };
+  } };
+  // A caller may announce a future revision. The schema guard must remain true at UPDATE time.
+  const legacy = server.request('PUT', { revision: 1, writeId: 'legacy-race', data: legacyData() });
+  await entered;
+  const upgraded = notebook(); upgraded.shopping.s1 = shopping();
+  const response = await server.request('PUT', { revision: 0, writeId: 'upgrade-race', data: upgraded });
+  release();
+  assert.equal(response.status, 200); assert.equal((await legacy).status, 426);
+  const after = await (await server.request()).json();
+  assert.equal(after.revision, 1); assert.deepEqual(after.data, upgraded);
+});
+
+test('agenda : nouveaux lieux, dates et horaires locaux, y compris les soirées après minuit', () => {
+  const data = notebook();
+  for (const kind of ['restaurant', 'boutique', 'exposition', 'lieu', 'evenement']) {
+    data.ideas.hotel.kind = kind;
+    Object.assign(data.ideas.hotel, { date: '2027-04-12', time: '22:00', endTime: '04:00', address: '12 rue des Exemples', owner: 'A' });
+    assert.doesNotThrow(() => validateData(data));
+  }
+  // An activity can remain dated while a stay is moved or a route variant is explored.
+  data.stages.paris.start = '2027-05-01'; data.stages.paris.end = '2027-05-03';
+  assert.doesNotThrow(() => validateData(data));
+  for (const changes of [
+    { date: '2027-02-29' }, { date: null }, { time: '24:00' }, { time: '7:30' },
+    { endTime: '19:60' }, { endTime: null }, { date: '', time: '19:00' },
+    { time: '', endTime: '04:00' }, { owner: 'someone' }, { owner: null },
+    { address: 'a'.repeat(501) }, { address: null }
+  ]) {
+    const invalid = clone(data); Object.assign(invalid.ideas.hotel, changes);
+    assert.throws(() => validateData(invalid));
+  }
+  const malformed = clone(data); malformed.ideas.bad = null;
+  assert.throws(() => validateData(malformed), error => error.name === 'ValidationError');
+  const old = legacyData(data);
+  assert.throws(() => validateData(old), /valeur est invalide/);
+  old.ideas.hotel.kind = 'activite'; old.ideas.hotel.date = '';
+  assert.throws(() => validateData(old), /champs sont invalides/);
+});
+
+test('anciennes idées v2 : valeurs agenda par défaut, aucune mutation ni faux conflit', () => {
+  const old = notebook();
+  for (const field of ['date', 'time', 'endTime', 'address', 'owner']) delete old.ideas.hotel[field];
+  const before = clone(old); assert.doesNotThrow(() => validateData(old));
+  const normalized = migrateData(old);
+  assert.deepEqual(old, before); assert.deepEqual(normalized.ideas.hotel, idea());
+  assert.deepEqual(migrateData(normalized), normalized);
+  assert.deepEqual(mergeThreeWay(migrateData(old), migrateData(old), normalized).conflicts, []);
+  const base = notebook(); base.ideas.hotel.date = '2027-01-12';
+  const local = clone(base); local.ideas.hotel.date = '';
+  const remote = clone(base); remote.ideas.hotel.time = '12:00';
+  assert.ok(mergeThreeWay(base, local, remote).conflicts.includes('/'));
+});
+
+test('cache v2 ancien : réponse perdue puis normalisation agenda sans écriture doublée', async t => {
+  const server = service(t); const storage = new Storage(); const first = client(t, server.fetcher, storage);
+  await first.sync.start(); first.sync.stop();
+  const key = [...storage.items.keys()][0]; const cache = JSON.parse(storage.getItem(key));
+  const old = notebook(); for (const field of ['date', 'time', 'endTime', 'address', 'owner']) delete old.ideas.hotel[field];
+  cache.base.data = clone(old); cache.local = clone(old); cache.local.trip.title = 'Brouillon v2 ancien';
+  cache.pending = { revision: 0, writeId: 'old-v2-pending', data: clone(cache.local) };
+  assert.equal((await server.request('PUT', cache.pending)).status, 200);
+  storage.setItem(key, JSON.stringify(cache)); let sent;
+  const restored = client(t, (url, init) => { if (init.method === 'PUT') sent = JSON.parse(init.body); return server.fetcher(url, init); }, storage);
+  await restored.sync.start();
+  assert.equal(restored.last().status, 'saved'); assert.equal(restored.last().revision, 1);
+  assert.notEqual(sent.writeId, 'old-v2-pending');
+  assert.equal(restored.last().data.ideas.hotel.owner, 'both');
+  assert.equal(restored.last().data.trip.title, 'Brouillon v2 ancien');
+  assert.equal(server.db.prepare('SELECT revision FROM trip').get().revision, 1);
+  await restored.sync.refresh(); assert.equal(restored.last().status, 'saved');
 });

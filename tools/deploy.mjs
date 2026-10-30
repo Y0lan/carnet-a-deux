@@ -5,6 +5,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { build } from './build.mjs';
+import { applyEnrichment } from './enrich.mjs';
 import { validateData } from '../public/schema.js';
 
 const root = resolve(import.meta.dirname, '..'), privateDir = join(root, '.private');
@@ -167,6 +168,11 @@ try {
   if (!built) throw new Error('GitHub Pages travaille encore. Relance la publication pour vérifier la suite.');
   const live = await fetch(new URL('config.js', pages.html_url), { cache: 'no-store', signal: AbortSignal.timeout(30000) });
   if (!live.ok || !(await live.text()).includes(endpoint)) throw new Error('La version publiée n\'est pas encore confirmée par sa lecture.');
+  if (process.argv.includes('--enrich')) {
+    console.log('Ajout des contenus privés préparés...');
+    const result = await applyEnrichment({ endpoint, token: code, privateDir });
+    console.log(result.status === 'already-applied' ? 'Ces contenus ont déjà été ajoutés. Les choix actuels sont conservés.' : 'Contenus privés ajoutés et relus.');
+  }
   console.log(`Site publié et contrôlé : ${pages.html_url}\nDépôt : ${repository.html_url}\nLien d'invitation privé : .private/invitation.txt`);
 } catch (error) {
   let message = error.message;

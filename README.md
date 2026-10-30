@@ -1,6 +1,12 @@
 # Carnet à deux
 
-Un carnet partagé : carte, calendrier des nuits, étapes modifiables, hôtels et activités à comparer, liens, notes et préférences de deux personnes.
+Un carnet partagé : carte, calendrier des nuits, fiches d'étapes illustrées, hôtels et activités à comparer, vols et liste shopping.
+
+La carte regroupe les repères proches à l'écran et les sépare au zoom. Elle propose un cadrage du voyage, de l'étape ou de sa liaison. Chaque étape peut avoir une photo avec son crédit, une description d'ambiance et les préférences des deux personnes.
+
+Les vols indiquent les horaires locaux, les fuseaux, la durée et les voyageurs. Les horaires peuvent rester vides tant qu'ils ne sont pas confirmés. Le shopping distingue les envies personnelles et communes, les prix par devise, les achats et le matériel déjà possédé.
+
+La vue Agenda affiche les idées de chaque journée : restaurants, boutiques, expositions, lieux et événements. Une idée peut rester sans date. Elle apparaît alors parmi les envies disponibles pendant l'étape. Les heures sont locales ; une soirée qui finit après minuit reste visible le lendemain. Chaque personne retrouve sa liste, avec une liste commune.
 
 GitHub Pages sert le site. Un Cloudflare Worker et D1 conservent le carnet. Le code est public. Les données et les codes d'accès restent hors du dépôt.
 
@@ -40,6 +46,16 @@ Le contrôle `--check` lit les comptes sans créer de ressources. La publication
 Le script utilise les connexions existantes. Il accepte aussi `GH_TOKEN` et `CLOUDFLARE_API_TOKEN` dans l'environnement. Ne mets jamais ces valeurs dans le code, les paramètres de commande ou le dépôt. Si plusieurs comptes Cloudflare existent, précise `CLOUDFLARE_ACCOUNT_ID`. Pour un autre nom de dépôt neuf, utilise `GITHUB_REPO`.
 
 Le script refuse de remplacer des ressources existantes sans lien avec sa publication. `.private/deployment.json` permet de reprendre une publication interrompue. Si une création distante a été interrompue sans confirmation, vérifie la ressource avant toute nouvelle tentative. Aucune suppression automatique n'est effectuée. Le script ne change pas l'abonnement des comptes utilisés.
+
+Si un fichier privé `.private/enrichment.json` a été préparé, cette commande publie aussi ses photos, textes, projets de vols et pistes shopping :
+
+```sh
+npm run deploy -- --enrich
+```
+
+Ces ajouts complètent les champs vides et conservent les fiches existantes. Une sauvegarde privée précède l'écriture. Une modification simultanée interrompt l'ajout sans écraser l'autre version. Le journal permet de reprendre après une coupure. Le même fichier n'est appliqué qu'une fois : une envie supprimée ensuite ne revient pas à la publication suivante.
+
+Le Worker est publié avant l'interface. Les contenus privés sont ajoutés après le contrôle de la publication GitHub Pages. Les anciens carnets sont migrés à l'ouverture, avec leurs brouillons. Une ancienne interface ne peut pas écraser les nouveaux champs ; recharge la page si elle demande une mise à jour.
 
 ## Partager le carnet
 

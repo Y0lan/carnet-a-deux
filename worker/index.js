@@ -89,12 +89,14 @@ async function fetchHandler(request, env) {
     const hash = Array.from(await digest(document), byte => byte.toString(16).padStart(2, '0')).join('');
     let current = await env.DB.prepare(readSql).first();
     if (!current) throw new Error('Stockage indisponible.');
+    if (body.data.schemaVersion === 1 && JSON.parse(current.document).schemaVersion === 2) throw new HttpError(426, 'Le carnet utilise une version plus récente. Recharge la page pour conserver les vols et le shopping.');
     if (current.last_write_id === body.writeId) return reply(current.last_write_hash === hash ? 200 : 409, envelope(current));
     const updatedAt = new Date().toISOString();
-    const result = await env.DB.prepare('UPDATE trip SET revision = revision + 1, updated_at = ?, document = ?, last_write_id = ?, last_write_hash = ? WHERE id = 1 AND revision = ? AND (last_write_id IS NULL OR last_write_id <> ?) RETURNING revision, updated_at, document, last_write_id, last_write_hash')
-      .bind(updatedAt, document, body.writeId, hash, body.revision, body.writeId).first();
+    const result = await env.DB.prepare("UPDATE trip SET revision = revision + 1, updated_at = ?, document = ?, last_write_id = ?, last_write_hash = ? WHERE id = 1 AND revision = ? AND (last_write_id IS NULL OR last_write_id <> ?) AND json_extract(document, '$.schemaVersion') <= ? RETURNING revision, updated_at, document, last_write_id, last_write_hash")
+      .bind(updatedAt, document, body.writeId, hash, body.revision, body.writeId, body.data.schemaVersion).first();
     if (result) return reply(200, envelope(result));
     current = await env.DB.prepare(readSql).first();
+    if (body.data.schemaVersion === 1 && JSON.parse(current.document).schemaVersion === 2) throw new HttpError(426, 'Le carnet utilise une version plus récente. Recharge la page pour conserver les vols et le shopping.');
     return reply(current.last_write_id === body.writeId && current.last_write_hash === hash ? 200 : 409, envelope(current));
   } catch (error) {
     if (error instanceof ValidationError) return reply(400, { error: error.message });
